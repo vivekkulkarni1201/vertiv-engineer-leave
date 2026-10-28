@@ -49,7 +49,7 @@ async function route(user){
   if(!p.active)throw Error('Account is inactive.');
   location.href=p.role==='admin'?'admin.html':'engineer.html'
 }
-async function startPage(which){mode=which;registerSW();try{db=client();const {data:{user},error}=await db.auth.getUser();if(error||!user){location.replace('index.html');return}
+async function startPage(which){mode=which;view=new Date();selected=new Date();registerSW();try{db=client();const {data:{user},error}=await db.auth.getUser();if(error||!user){location.replace('index.html');return}
   let pRes=await db.from('profiles').select('*').eq('id',user.id).maybeSingle();
   if(pRes.error && pRes.error.code!=='PGRST116') throw pRes.error;
   person=pRes.data;
@@ -86,12 +86,61 @@ function special(s){if(date(s).getDay()===0)return'Sunday • weekly off';const 
 function dayLeaves(s){return leaves.filter(l=>l.leave_date===s&&(mode==='admin'?true:l.user_id===person.id))}
 function engineerNameByUser(id){return people.find(p=>p.id===id)?.full_name || 'Engineer'}
 function activeRosterCount(){return mode==='admin' ? roster.filter(r=>r.active).length : 0}
-function render(){const title=view.toLocaleString('en-GB',{month:'long',year:'numeric'});$('month').textContent=title;let start=new Date(view.getFullYear(),view.getMonth(),1),offset=(start.getDay()+6)%7,last=new Date(view.getFullYear(),view.getMonth()+1,0).getDate();let html='';for(let i=0;i<offset;i++)html+='<div class="day blank"></div>';for(let n=1;n<=last;n++){let s=iso(new Date(view.getFullYear(),view.getMonth(),n)),sp=special(s),ls=dayLeaves(s);if(mode==='admin'){ls=ls.filter(l=>roster.some(r=>r.active && people.some(p=>p.id===l.user_id && p.full_name===r.full_name) || people.some(p=>p.id===l.user_id)));}
-    let full=ls.filter(l=>l.portion==='full').length,half=ls.filter(l=>l.portion!=='full').length,total=activeRosterCount(),present=Math.max(0,total-full-half),label=sp?'OFF':mode==='admin'?`P ${present} A ${full} ½ ${half}`:ls.length?(ls[0].portion==='full'?'Full leave':'½ day leave'):'Available';
-    html+=`<button class="day ${sp?'weekend holiday':ls.length?'absence':''} ${s===iso(selected)?'current':''}" onclick="choose('${s}')"><span class="num">${n}</span><span class="metric">${esc(label)}</span></button>`}
-  $('calendar').innerHTML=html;if(mode==='admin'){renderAdmin();renderRoster()}else renderEngineer()}
+// One calculation for calendar cells, KPIs and selected-date details.
+function activeTeamCount(){return roster.filter(r=>r.active).length}
+function countedLeaves(s){
+  if(special(s))return [];
+  // Database returns the same leave records for calendar and selected-day cards.
+  // Deduplicate by user ID; no different filter for each UI surface.
+  const seen=new Set();
+  return leaves.filter(l=>{
+    if(l.leave_date!==s||seen.has(l.user_id))return false;
+    seen.add(l.user_id);return true;
+  });
+}
+function dayNumbers(s){
+  const ls=countedLeaves(s),full=ls.filter(l=>l.portion==='full').length,
+        half=ls.length-full,total=activeTeamCount();
+  return {ls,full,half,total,present:Math.max(0,total-full-half)};
+}
+function render(){
+  $('month').textContent=view.toLocaleString('en-GB',{month:'long',year:'numeric'});
+  const start=new Date(view.getFullYear(),view.getMonth(),1),offset=(start.getDay()+6)%7;
+  const last=new Date(view.getFullYear(),view.getMonth()+1,0).getDate();
+  let html='';
+  for(let i=0;i<offset;i++)html+='<div class="day blank"></div>';
+  for(let n=1;n<=last;n++){
+    const s=iso(new Date(view.getFullYear(),view.getMonth(),n)),sp=special(s);
+    let label='',classes='';
+    if(sp){label=sp;classes='weekend holiday'}
+    else if(mode==='admin'){
+      const d=dayNumbers(s);
+      label=`<span class="cell-count present-count">P ${d.present}</span> <span class="cell-count absent-count">A ${d.full}</span> <span class="cell-count half-count">½ ${d.half}</span>`;
+      classes=d.full||d.half?'absence':'';
+    }else{
+      const mine=dayLeaves(s)[0];label=mine?(mine.portion==='full'?'Full leave':'½ day leave'):'Available';
+      classes=mine?'absence':'';
+    }
+    const text=sp||mode!=='admin'?esc(label):label;
+    html+=`<button class="day ${classes} ${s===iso(selected)?'current':''}" onclick="choose('${s}')"><span class="num">${n}</span><span class="metric">${text}</span></button>`;
+  }
+  $('calendar').innerHTML=html;
+  if(mode==='admin'){renderAdmin();renderRoster()}else renderEngineer();
+}
 function choose(s){selected=date(s);render()}
-function renderAdmin(){let s=iso(selected),sp=special(s),ls=sp?[]:dayLeaves(s),full=ls.filter(x=>x.portion==='full').length,half=ls.length-full,total=activeRosterCount(),present=Math.max(0,total-full-half);$('total').textContent=String(total);$('available').textContent=sp?'OFF':String(present);$('onleave').textContent=sp?'—':String(full);$('leaveunits').textContent=sp?'—':String(half);$('selectedTitle').textContent=fmt(s);$('selectedSummary').textContent=sp?sp:`${present} present • ${full} full-day leave • ${half} half-day leave • ${total} active engineers`;$('detail').innerHTML=ls.length?ls.map(l=>`<div class="item"><div><strong>${esc(engineerNameByUser(l.user_id))}</strong><div class="muted small">${esc(l.reason)}</div></div><span class="pill red">${l.portion==='full'?'FULL':l.portion==='am'?'AM ½':'PM ½'}</span></div>`).join(''):'<p class="muted small">No leave marked for this date.</p>';$('holidaylist').innerHTML=holidays.length?holidays.map(h=>`<div class="item"><div><strong>${esc(h.title)}</strong><div class="small muted">${fmt(h.holiday_date)}</div></div><button class="danger" onclick="removeHoliday('${h.holiday_date}')">Remove</button></div>`).join(''):'<p class="muted small">No company holidays entered for this month.</p>';$('team').innerHTML=roster.length?roster.map(r=>`<div class="item"><div><strong>${esc(r.full_name)}</strong><div class="muted small">${esc(r.employee_code)} • ${esc(r.email)}</div></div><span class="pill ${r.active?'green':'red'}">${r.active?'Active':'Inactive'}</span></div>`).join(''):'<p class="muted">No active engineer roster yet.</p>';$('register').innerHTML=leaves.sort((a,b)=>a.leave_date.localeCompare(b.leave_date)).map(l=>`<tr><td>${esc(l.leave_date)}</td><td>${esc(engineerNameByUser(l.user_id))}</td><td>${l.portion==='full'?'Full day':l.portion==='am'?'First half':'Second half'}</td><td>${esc(l.reason)}</td></tr>`).join('')||'<tr><td colspan="4">No leaves in this month.</td></tr>'}
+function renderAdmin(){
+  const s=iso(selected),sp=special(s),{ls,full,half,total,present}=dayNumbers(s);
+  $('total').textContent=String(total);
+  $('available').textContent=sp?'OFF':String(present);
+  $('onleave').textContent=sp?'—':String(full);
+  $('leaveunits').textContent=sp?'—':String(half);
+  $('selectedTitle').textContent=fmt(s);
+  $('selectedSummary').textContent=sp?sp:`${present} present • ${full} full-day leave • ${half} half-day leave • ${total} active engineers`;
+  $('detail').innerHTML=ls.length?ls.map(l=>`<div class="item"><div><strong>${esc(engineerNameByUser(l.user_id))}</strong><div class="muted small">${esc(l.reason)}</div></div><span class="pill red">${l.portion==='full'?'FULL':l.portion==='am'?'AM ½':'PM ½'}</span></div>`).join(''):'<p class="muted small">No leave marked for this date.</p>';
+  $('holidaylist').innerHTML=holidays.length?holidays.map(h=>`<div class="item"><div><strong>${esc(h.title)}</strong><div class="small muted">${fmt(h.holiday_date)}</div></div><button class="danger" onclick="removeHoliday('${h.holiday_date}')">Remove</button></div>`).join(''):'<p class="muted small">No company holidays entered for this month.</p>';
+  $('team').innerHTML=roster.length?roster.map(r=>`<div class="item"><div><strong>${esc(r.full_name)}</strong><div class="muted small">${esc(r.employee_code)} • ${esc(r.email)}</div></div><span class="pill green">Active</span></div>`).join(''):'<p class="muted">No active engineer roster yet.</p>';
+  $('register').innerHTML=leaves.slice().sort((a,b)=>a.leave_date.localeCompare(b.leave_date)).map(l=>`<tr><td>${esc(l.leave_date)}</td><td>${esc(engineerNameByUser(l.user_id))}</td><td>${l.portion==='full'?'Full day':l.portion==='am'?'First half':'Second half'}</td><td>${esc(l.reason)}</td></tr>`).join('')||'<tr><td colspan="4">No leaves in this month.</td></tr>';
+}
 function renderEngineer(){let s=iso(selected),sp=special(s),mine=dayLeaves(s)[0];$('selectedTitle').textContent=fmt(s);$('dayHint').textContent=sp?`${sp} — leave cannot be marked.`:mine?'You have already marked leave. Update or cancel below.':'Mark your leave for this working day.';$('leaveform').classList.toggle('hidden',Boolean(sp));$('portion').value=mine?.portion||'full';$('reason').value=mine?.reason||'';$('cancelbtn').disabled=!mine;$('myleaves').innerHTML=leaves.filter(l=>l.user_id===person.id).sort((a,b)=>a.leave_date.localeCompare(b.leave_date)).map(l=>`<div class="item"><div><strong>${fmt(l.leave_date)}</strong><div class="muted small">${esc(l.reason)}</div></div><span class="pill red">${l.portion==='full'?'Full':l.portion==='am'?'AM ½':'PM ½'}</span></div>`).join('')||'<p class="muted">No leave marked this month.</p>'}
 async function saveLeave(e){e.preventDefault();const s=iso(selected);if(special(s))return status('Non-working day cannot be marked as leave.',true);try{$('savebtn').disabled=true;await check(await db.from('leaves').upsert({user_id:person.id,leave_date:s,portion:$('portion').value,reason:$('reason').value.trim()},{onConflict:'user_id,leave_date'}));status(`Leave saved for ${fmt(s)}.`);await refresh()}catch(e){status(e.message,true)}finally{$('savebtn').disabled=false}}
 async function cancelLeave(){const s=iso(selected);if(!confirm(`Cancel your leave for ${fmt(s)}?`))return;try{await check(await db.from('leaves').delete().eq('user_id',person.id).eq('leave_date',s));status('Leave cancelled.');await refresh()}catch(e){status(e.message,true)}}
@@ -103,4 +152,6 @@ function showAdminTab(tab){const a=tab==='calendar';$('calendarPane').classList.
 function renderRoster(){if(!$('rosterlist'))return;$('rosterlist').innerHTML=roster.length?roster.map(r=>`<div class="item"><div><strong>${esc(r.full_name)}</strong><div class="muted small">${esc(r.employee_code)} • ${esc(r.email)}</div></div><button onclick="setRosterActive('${r.id}',${!r.active})">${r.active?'Deactivate':'Activate'}</button></div>`).join(''):'<p class="muted">No engineers added yet.</p>'}
 async function addRoster(e){e.preventDefault();const btn=e.submitter;try{btn.disabled=true;const row={full_name:$('rosterName').value.trim(),employee_code:$('rosterCode').value.trim(),email:$('rosterEmail').value.trim().toLowerCase(),active:true};await check(await db.from('engineer_roster').insert(row));$('rosterform').reset();$('rosterMessage').textContent='Engineer added. Ask engineer to use the registered email for first-time activation on the login page.';await refresh()}catch(err){$('rosterMessage').textContent=err.message}finally{btn.disabled=false}}
 async function setRosterActive(id,active){try{await check(await db.from('engineer_roster').update({active}).eq('id',id));await refresh()}catch(err){$('rosterMessage').textContent=err.message}}
+function resetAdminToToday(){if(mode!=='admin'||!$('app')||$('app').classList.contains('hidden'))return;view=new Date();selected=new Date();refresh()}
+window.addEventListener('pageshow',e=>{if(e.persisted)resetAdminToToday()});
 function registerSW(){if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}))}}

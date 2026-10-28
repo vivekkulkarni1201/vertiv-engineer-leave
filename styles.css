@@ -4,3 +4,10 @@
 
 .brandwrap{display:flex;align-items:center;gap:14px}.logo{height:42px;width:auto;display:block}.brandtext{font-size:18px;font-weight:900;letter-spacing:.5px;color:#1a2f49}.install-card{margin-top:14px;padding:10px 12px;border:1px dashed #c9d8ea;border-radius:10px;background:#f9fbfe;color:#4d6076;font-size:13px}
 @media(max-width:650px){.logo{height:34px}.brandtext{font-size:15px}.brandwrap{align-items:flex-start}}
+
+/* V6.1: distinct, legible calendar status values */
+.day .metric:has(.cell-count){display:flex;flex-wrap:wrap;gap:3px 7px;align-items:center}
+.cell-count{font-weight:850;white-space:nowrap}.present-count{color:#148052}.absent-count{color:#c52645}.half-count{color:#9b6015}
+.day.absence{background:#fff0f1;border-color:#eeaeba}.day.absence .absent-count{color:#ba153b}
+.day.holiday .metric{line-height:1.25;font-size:10px;color:#6e7785;overflow-wrap:anywhere;font-weight:700}
+@media(max-width:650px){.day .metric:has(.cell-count){gap:2px 4px}.cell-count{font-size:9px}.day.holiday .metric{font-size:9px}}
