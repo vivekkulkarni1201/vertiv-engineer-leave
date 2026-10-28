@@ -56,7 +56,7 @@ async function startPage(which){mode=which;view=new Date();selected=new Date();r
   if(!person && which==='engineer') person=await ensureProfile(user);
   if(!person){location.replace('index.html');return}
   if(!person.active||which==='admin'&&person.role!=='admin'){location.replace('index.html');return}
-  $('who').textContent=person.full_name; if($('adminLink')&&person.role==='admin')$('adminLink').classList.remove('hidden');$('loading').classList.add('hidden');$('app').classList.remove('hidden');if(which==='admin'){$('holidayform').onsubmit=addHoliday;$('rosterform').onsubmit=addRoster;showAdminTab('calendar')}else{$('leaveform').onsubmit=saveLeave} await refresh();
+  $('who').textContent=person.full_name; if($('adminLink')&&person.role==='admin')$('adminLink').classList.remove('hidden');$('loading').classList.add('hidden');$('app').classList.remove('hidden');if(which==='admin'){/* settings moved to settings.html */}else{$('leaveform').onsubmit=saveLeave} await refresh();
   feed=db.channel('leave-availability-'+which+'-'+user.id)
     .on('postgres_changes',{event:'*',schema:'public',table:'leaves'},()=>refresh())
     .on('postgres_changes',{event:'*',schema:'public',table:'holidays'},()=>refresh())
@@ -69,12 +69,12 @@ async function refresh(){try{const [start,end]=monthBounds();const jobs=[
   db.from('leaves').select('*').gte('leave_date',start).lte('leave_date',end)
 ];
   if(mode==='admin'){
-    jobs.push(db.from('profiles').select('id,full_name,active,role').eq('active',true));
+    jobs.push(db.from('profiles').select('id,full_name,active,role,email').eq('active',true));
     jobs.push(db.from('engineer_roster').select('*').order('full_name'));
   }
   const all=await Promise.all(jobs);holidays=await check(all[0]);leaves=await check(all[1]);
   if(mode==='admin'){
-    const profiles=(await check(all[2])).filter(p=>p.role==='engineer');
+    const profiles=(await check(all[2]));
     roster=await check(all[3]);
     // Use roster as planned team count, but names from profiles when available
     people=profiles;
@@ -126,7 +126,7 @@ function render(){
     html+=`<button class="day ${classes} ${s===iso(selected)?'current':''}" onclick="choose('${s}')"><span class="num">${n}</span><span class="metric">${text}</span></button>`;
   }
   $('calendar').innerHTML=html;
-  if(mode==='admin'){renderAdmin();renderRoster()}else renderEngineer();
+  if(mode==='admin'){renderAdmin();renderMonthlySummary()}else {renderEngineer();renderMySummary()};
 }
 function choose(s){selected=date(s);render()}
 function renderAdmin(){
@@ -158,3 +158,36 @@ window.addEventListener('pageshow',e=>{if(e.persisted)resetAdminToToday()});
 function registerSW(){if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}))}}
 
 async function setRosterRole(id,access_role){if(!confirm('Change access role to '+(access_role==='admin'?'Admin':'Testing Engineer')+'?')){await refresh();return}try{await check(await db.from('engineer_roster').update({access_role}).eq('id',id));status('Access role updated. User should sign out and log in again.',false,'rosterMessage');await refresh()}catch(e){status(e.message,true,'rosterMessage');await refresh()}}
+
+
+// V7: Separate role and attendance inclusion. Never infer attendance from access role.
+let summaryView=new Date();
+function includedRoster(){return roster.filter(r=>r.active && r.attendance_included!==false)}
+function activeTeamCount(){return includedRoster().length}
+function activeRosterCount(){return activeTeamCount()}
+function eligibleIds(){const emails=new Set(includedRoster().map(r=>r.email?.toLowerCase()));return new Set(people.filter(p=>emails.has((p.email||'').toLowerCase())).map(p=>p.id))}
+// Link auth ID to roster via email in refresh; no name matching assumptions.
+function countedLeaves(s){if(special(s))return [];const allowed=new Set(people.filter(p=>includedRoster().some(r=>r.email?.toLowerCase()===p.email?.toLowerCase())).map(p=>p.id));const seen=new Set();return leaves.filter(l=>l.leave_date===s&&allowed.has(l.user_id)&&!seen.has(l.user_id)&&(seen.add(l.user_id),true))}
+function engineerNameByUser(id){return people.find(p=>p.id===id)?.full_name||'Engineer'}
+function isWorkday(s){return !special(s)}
+function getMonthStats(userId,yy,mm){let p=0,a=0,h=0;const end=new Date(yy,mm+1,0).getDate();for(let d=1;d<=end;d++){const s=iso(new Date(yy,mm,d));if(!isWorkday(s))continue;const leave=leaves.find(x=>x.user_id===userId&&x.leave_date===s);if(!leave)p++;else if(leave.portion==='full')a++;else h++}return {p,a,h}}
+function renderMonthlySummary(){if(!$('monthlySummary'))return;$('summaryMonth').textContent=summaryView.toLocaleString('en-GB',{month:'long',year:'numeric'});$('monthlySummary').innerHTML=includedRoster().map(r=>{const p=people.find(x=>x.email?.toLowerCase()===r.email?.toLowerCase());const st=p?getMonthStats(p.id,summaryView.getFullYear(),summaryView.getMonth()):{p:0,a:0,h:0};return `<div class="summary-person"><strong>${esc(r.full_name)}</strong><span class="muted small">${esc(r.access_role==='admin'?'Admin':'Testing Engineer')}</span><div class="summary-metrics"><span class="present-count">P ${p?st.p:'—'}</span><span class="absent-count">A ${p?st.a:'—'}</span><span class="half-count">½ ${p?st.h:'—'}</span></div>${!p?'<span class="small muted">Login not activated</span>':''}</div>`}).join('')||'<p class="muted">No included active engineers.</p>'}
+function changeSummaryMonth(n){summaryView=new Date(summaryView.getFullYear(),summaryView.getMonth()+n,1);/* load full selected summary month */loadSummaryMonth()}
+async function loadSummaryMonth(){try{const y=summaryView.getFullYear(),m=summaryView.getMonth(),from=iso(new Date(y,m,1)),to=iso(new Date(y,m+1,0));const results=await Promise.all([db.from('leaves').select('*').gte('leave_date',from).lte('leave_date',to),db.from('holidays').select('*').gte('holiday_date',from).lte('holiday_date',to)]);summaryLeaves=await check(results[0]);summaryHolidays=await check(results[1]);renderMonthlySummary()}catch(e){status(e.message,true)}}
+let summaryLeaves=null,summaryHolidays=null;
+function getMonthStats(userId,yy,mm){let p=0,a=0,h=0;const monthCurrent=yy===view.getFullYear()&&mm===view.getMonth();const ldata=monthCurrent?leaves:(summaryLeaves||[]),hdata=monthCurrent?holidays:(summaryHolidays||[]);const last=new Date(yy,mm+1,0).getDate();for(let d=1;d<=last;d++){const s=iso(new Date(yy,mm,d));if(date(s).getDay()===0||hdata.some(x=>x.holiday_date===s))continue;const v=ldata.find(x=>x.user_id===userId&&x.leave_date===s);if(!v)p++;else if(v.portion==='full')a++;else h++}return{p,a,h}}
+function renderMySummary(){if(!$('myCounts'))return;const st=getMonthStats(person.id,view.getFullYear(),view.getMonth());$('myCounts').innerHTML=`<div class="mini-stat present-count">Present <strong>${st.p}</strong></div><div class="mini-stat absent-count">Full Leave <strong>${st.a}</strong></div><div class="mini-stat half-count">Half-day <strong>${st.h}</strong></div>`}
+// Override renderAdmin to preserve original calendar functionality but remove settings-only widgets.
+const priorRenderAdmin=renderAdmin;
+renderAdmin=function(){const s=iso(selected),sp=special(s),{ls,full,half,total,present}=dayNumbers(s);$('total').textContent=String(total);$('available').textContent=sp?'OFF':String(present);$('onleave').textContent=sp?'—':String(full);$('leaveunits').textContent=sp?'—':String(half);$('selectedTitle').textContent=fmt(s);$('selectedSummary').textContent=sp?sp:`${present} present • ${full} full-day leave • ${half} half-day leave • ${total} counted engineers`;$('detail').innerHTML=ls.length?ls.map(l=>`<div class="item"><div><strong>${esc(engineerNameByUser(l.user_id))}</strong><div class="muted small">${esc(l.reason)}</div></div><span class="pill red">${l.portion==='full'?'FULL':l.portion==='am'?'AM ½':'PM ½'}</span></div>`).join(''):'<p class="muted small">No leave marked for this date.</p>';$('register').innerHTML=leaves.slice().sort((a,b)=>a.leave_date.localeCompare(b.leave_date)).map(l=>`<tr><td>${esc(l.leave_date)}</td><td>${esc(engineerNameByUser(l.user_id))}</td><td>${l.portion==='full'?'Full day':l.portion==='am'?'First half':'Second half'}</td><td>${esc(l.reason)}</td></tr>`).join('')||'<tr><td colspan="4">No leaves in this month.</td></tr>'};
+// Protect Settings with the current admin password. Role restrictions enforced by Supabase RLS.
+async function startSettings(){registerSW();try{db=client();const {data:{user},error}=await db.auth.getUser();if(error||!user){location.replace('index.html');return}person=await check(await db.from('profiles').select('*').eq('id',user.id).single());if(!person.active||person.role!=='admin'){location.replace('index.html');return}$('who').textContent=person.full_name;$('unlockForm').onsubmit=async e=>{e.preventDefault();const pw=$('unlockPassword').value;try{const res=await db.auth.signInWithPassword({email:user.email,password:pw});if(res.error)throw Error('Password verification failed');$('unlockPassword').value='';$('settingsGate').classList.add('hidden');$('settingsContent').classList.remove('hidden');$('rosterform').onsubmit=addRoster;$('holidayform').onsubmit=addHoliday;await refreshSettings()}catch(err){status(err.message,true,'unlockStatus')}}}catch(e){status(e.message,true,'unlockStatus')}}
+async function refreshSettings(){try{roster=await check(await db.from('engineer_roster').select('*').order('full_name'));holidays=await check(await db.from('holidays').select('*').order('holiday_date'));renderSettingsRoster();renderSettingsHolidays()}catch(e){status(e.message,true)}}
+function renderSettingsHolidays(){$('holidaylist').innerHTML=holidays.map(h=>`<div class="item"><div><b>${esc(h.title)}</b><div class="muted small">${esc(h.holiday_date)}</div></div><button class="danger" onclick="removeHoliday('${h.holiday_date}')">Remove</button></div>`).join('')||'<p class="muted">No holidays configured.</p>'}
+function renderSettingsRoster(){$('rosterlist').innerHTML=roster.map(r=>`<div class="item settings-row"><div><strong>${esc(r.full_name)}</strong><div class="muted small">${esc(r.employee_code)} · ${esc(r.email)}</div></div><div class="controlrow"><label>Role <select onchange="setRosterRole('${r.id}',this.value)"><option value="engineer" ${r.access_role==='engineer'?'selected':''}>Testing Engineer</option><option value="admin" ${r.access_role==='admin'?'selected':''}>Admin</option></select></label><label>Count in Attendance <select onchange="setAttendanceIncluded('${r.id}',this.value==='true')"><option value="true" ${r.attendance_included!==false?'selected':''}>Yes</option><option value="false" ${r.attendance_included===false?'selected':''}>No</option></select></label><button onclick="setRosterActive('${r.id}',${!r.active})">${r.active?'Deactivate':'Activate'}</button></div></div>`).join('')||'<p class="muted">No engineers registered.</p>'}
+async function addRoster(e){e.preventDefault();try{const row={full_name:$('rosterName').value.trim(),employee_code:$('rosterCode').value.trim(),email:$('rosterEmail').value.trim().toLowerCase(),access_role:$('rosterRole').value,attendance_included:$('rosterCount').value==='true',active:true};await check(await db.from('engineer_roster').insert(row));$('rosterform').reset();status('Engineer added. Account can now be activated using registered email.',false,'rosterMessage');await refreshSettings()}catch(e){status(e.message,true,'rosterMessage')}}
+async function setAttendanceIncluded(id,attendance_included){try{await check(await db.from('engineer_roster').update({attendance_included}).eq('id',id));status('Attendance inclusion updated.',false,'rosterMessage');await refreshSettings()}catch(e){status(e.message,true,'rosterMessage');await refreshSettings()}}
+async function setRosterRole(id,access_role){if(!confirm('Change role to '+(access_role==='admin'?'Admin':'Testing Engineer')+'?'))return refreshSettings();try{await check(await db.from('engineer_roster').update({access_role}).eq('id',id));status('Role updated. User must sign out and sign in again.',false,'rosterMessage');await refreshSettings()}catch(e){status(e.message,true,'rosterMessage')}}
+async function setRosterActive(id,active){try{await check(await db.from('engineer_roster').update({active}).eq('id',id));await refreshSettings()}catch(e){status(e.message,true,'rosterMessage')}}
+async function addHoliday(e){e.preventDefault();const s=$('holidaydate').value;if(date(s).getDay()===0)return status('Sunday already weekly off',true);try{await check(await db.from('holidays').upsert({holiday_date:s,title:$('holidayname').value.trim()}));$('holidayform').reset();await refreshSettings()}catch(e){status(e.message,true)}}
+async function removeHoliday(s){if(!confirm('Remove holiday?'))return;try{await check(await db.from('holidays').delete().eq('holiday_date',s));await refreshSettings()}catch(e){status(e.message,true)}}
